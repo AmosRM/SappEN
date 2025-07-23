@@ -109,9 +109,9 @@ elif data_source == "Fetch from EnAppSys API":
     
     api_resolution = st.sidebar.selectbox(
         "Resolution",
-        ("hourly", "daily", "weekly", "monthly"),
+        ("qh", "hourly", "daily", "weekly", "monthly"),
         index=0,
-        help="Data resolution/frequency"
+        help="Data resolution/frequency (qh = quarter hourly)"
     )
     
     api_timezone = st.sidebar.selectbox(
@@ -233,56 +233,123 @@ with st.sidebar.expander("Holiday Configuration"):
                                  height=150)
     holiday_dates = [date.strip() for date in holiday_input.split('\n') if date.strip()]
     holiday_set = set(holiday_dates)
+
+# Cache Management
+with st.sidebar.expander("💾 Cache Management"):
+    cached_items = []
+    if 'cached_df_price' in st.session_state:
+        cached_items.append("✅ Price Data")
+    if 'cached_df_demand' in st.session_state:
+        cached_items.append("✅ Demand Data")
+    if 'cached_df_peak' in st.session_state:
+        cached_items.append("✅ Peak Restriction Data")
     
+    if cached_items:
+        st.write("**Cached Data:**")
+        for item in cached_items:
+            st.write(item)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🗑️ Clear All Cache", help="Clear all cached data and force refresh"):
+                # Clear all cache
+                keys_to_remove = [k for k in st.session_state.keys() if k.startswith('cached_')]
+                for key in keys_to_remove:
+                    del st.session_state[key]
+                st.rerun()
+        with col2:
+            if st.button("🔄 Refresh Data", help="Clear cache and reload current configuration"):
+                # Clear all cache
+                keys_to_remove = [k for k in st.session_state.keys() if k.startswith('cached_')]
+                for key in keys_to_remove:
+                    del st.session_state[key]
+                st.rerun()
+    else:
+        st.write("No cached data")
+        st.caption("Data will be automatically cached after first fetch/upload")
+
 # --- MAIN LOGIC CHANGE ---
 if uploaded_file is not None or api_config is not None or use_builtin_data:
-    df_price = None
+    
+    # Create a unique key for the current configuration
+    config_key = None
+    if uploaded_file is not None:
+        config_key = f"file_{uploaded_file.name}_{hash(uploaded_file.getvalue())}"
+    elif api_config is not None:
+        config_key = f"api_{hash(str(sorted(api_config.items())))}"
+    elif use_builtin_data:
+        config_key = "builtin_epex2024"
+    
+    # Check if we have cached data for this exact configuration
+    if ('cached_config_key' in st.session_state and 
+        'cached_df_price' in st.session_state and 
+        st.session_state['cached_config_key'] == config_key):
+        
+        # Use cached data
+        df_price = st.session_state['cached_df_price']
+        st.success("✅ Using cached data from previous fetch!")
+        
+    else:
+        # Need to fetch new data
+        df_price = None
 
-    if transform_data:
-        st.info("Data source detected. Running ETL transformation...")
-        with st.spinner("Transforming data from long to wide format..."):
+        if transform_data:
+            st.info("New data source detected. Running ETL transformation...")
+            with st.spinner("Transforming data from long to wide format..."):
+                try:
+                    if uploaded_file is not None:
+                        # File upload mode
+                        df_price = etl_long_to_wide(
+                            input_source=uploaded_file,
+                            datetime_column_name='Date (CET)',
+                            value_column_name='Day Ahead Price'
+                        )
+                        st.success("✅ Price ETL transformation successful!")
+                    elif api_config is not None:
+                        # API mode
+                        df_price = etl_long_to_wide(
+                            use_api=True,
+                            api_config=api_config
+                        )
+                        st.success("✅ API data fetched and ETL transformation successful!")
+                    elif use_builtin_data:
+                        # Built-in data mode
+                        df_price = etl_long_to_wide(
+                            input_source="idprices-epex2024.csv",
+                            datetime_column_name='Date (CET)',
+                            value_column_name='Day Ahead Price'
+                        )
+                        st.success("✅ Built-in EPEX 2024 data fetched and ETL transformation successful!")
+                        
+                    # Cache the successful result
+                    if df_price is not None:
+                        st.session_state['cached_df_price'] = df_price.copy()
+                        st.session_state['cached_config_key'] = config_key
+                        
+                except Exception as e:
+                    st.error(f"❌ ETL process failed: {e}")
+                    st.info("Please check your configuration. For API: verify credentials and parameters. For files: ensure the header row is correct and column names match the expected input.")
+                    st.stop()
+        else:
             try:
                 if uploaded_file is not None:
-                    # File upload mode
-                    df_price = etl_long_to_wide(
-                        input_source=uploaded_file,
-                        datetime_column_name='Date (CET)',
-                        value_column_name='Day Ahead Price'
-                    )
-                    st.success("✅ Price ETL transformation successful!")
-                elif api_config is not None:
-                    # API mode
-                    df_price = etl_long_to_wide(
-                        use_api=True,
-                        api_config=api_config
-                    )
-                    st.success("✅ API data fetched and ETL transformation successful!")
+                    st.info("Loading price data directly in wide format.")
+                    df_price = pd.read_csv(uploaded_file)
                 elif use_builtin_data:
-                    # Built-in data mode
-                    df_price = etl_long_to_wide(
-                        input_source="idprices-epex2024.csv",
-                        datetime_column_name='Date (CET)',
-                        value_column_name='Day Ahead Price'
-                    )
-                    st.success("✅ Built-in EPEX 2024 data fetched and ETL transformation successful!")
+                    st.info("Loading price data directly in wide format from built-in EPEX 2024 data.")
+                    df_price = pd.read_csv("idprices-epex2024.csv")
+                else:
+                    st.error("❌ API data must be transformed. Cannot load API data directly in wide format.")
+                    st.stop()
+                    
+                # Cache the successful result
+                if df_price is not None:
+                    st.session_state['cached_df_price'] = df_price.copy()
+                    st.session_state['cached_config_key'] = config_key
+                    
             except Exception as e:
-                st.error(f"❌ ETL process failed: {e}")
-                st.info("Please check your configuration. For API: verify credentials and parameters. For files: ensure the header row is correct and column names match the expected input.")
+                st.error(f"❌ Failed to load the price CSV file: {e}")
                 st.stop()
-    else:
-        try:
-            if uploaded_file is not None:
-                st.info("Loading price data directly in wide format.")
-                df_price = pd.read_csv(uploaded_file)
-            elif use_builtin_data:
-                st.info("Loading price data directly in wide format from built-in EPEX 2024 data.")
-                df_price = pd.read_csv("idprices-epex2024.csv")
-            else:
-                st.error("❌ API data must be transformed. Cannot load API data directly in wide format.")
-                st.stop()
-        except Exception as e:
-            st.error(f"❌ Failed to load the price CSV file: {e}")
-            st.stop()
 
     # --- NEW: Process demand data if uploaded ---
     df_demand = None
@@ -291,19 +358,98 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             st.warning("Please upload a Customer Demand CSV file in the sidebar to proceed.")
             st.stop()
         else:
-            st.info("Uploaded demand file detected. Processing...")
-            with st.spinner("Transforming demand data from long to wide format..."):
-                try:
-                    df_demand = etl_long_to_wide(
-                        input_source=demand_file,
-                        datetime_column_name='Date (CET)',
-                        value_column_name='MW-th'
-                    )
-                    st.success("✅ Demand ETL transformation successful!")
-                except Exception as e:
-                    st.error(f"❌ Demand file processing failed: {e}")
-                    st.info("Please ensure the demand file has 'Date (CET)' and 'MW-th' columns.")
-                    st.stop()
+            # Create demand config key
+            demand_config_key = f"demand_{demand_file.name}_{hash(demand_file.getvalue())}"
+            
+            # Check if we have cached demand data
+            if ('cached_demand_config_key' in st.session_state and 
+                'cached_df_demand' in st.session_state and 
+                st.session_state['cached_demand_config_key'] == demand_config_key):
+                
+                # Use cached demand data
+                df_demand = st.session_state['cached_df_demand']
+                st.success("✅ Using cached demand data from previous upload!")
+                
+            else:
+                # Need to process new demand data
+                st.info("New demand file detected. Processing...")
+                with st.spinner("Transforming demand data from long to wide format..."):
+                    try:
+                        df_demand = etl_long_to_wide(
+                            input_source=demand_file,
+                            datetime_column_name='Date (CET)',
+                            value_column_name='MW-th'
+                        )
+                        st.success("✅ Demand ETL transformation successful!")
+                        
+                        # Cache the successful result
+                        st.session_state['cached_df_demand'] = df_demand.copy()
+                        st.session_state['cached_demand_config_key'] = demand_config_key
+                        
+                    except Exception as e:
+                        st.error(f"❌ Demand file processing failed: {e}")
+                        st.info("Please ensure the demand file has 'Date (CET)' and 'MW-th' columns.")
+                        st.stop()
+
+    # --- NEW: Process peak restriction data if uploaded ---
+    df_peak = None
+    if peak_period_option == 'Upload CSV File':
+        if peak_period_file is None:
+            st.warning("Please upload a Peak Period CSV file in the sidebar to proceed.")
+            st.stop()
+        else:
+            # Create peak config key
+            peak_config_key = f"peak_{peak_period_file.name}_{hash(peak_period_file.getvalue())}"
+            
+            # Check if we have cached peak data
+            if ('cached_peak_config_key' in st.session_state and 
+                'cached_df_peak' in st.session_state and 
+                st.session_state['cached_peak_config_key'] == peak_config_key):
+                
+                # Use cached peak data
+                df_peak = st.session_state['cached_df_peak']
+                st.success("✅ Using cached peak restriction data from previous upload!")
+                
+            else:
+                # Need to process new peak data
+                st.info("New peak restriction file detected. Processing...")
+                with st.spinner("Analyzing and cleaning peak restriction file..."):
+                    try:
+                        # --- ROBUST FILE HANDLING LOGIC ---
+                        
+                        # 1. Read the file to find the real header row
+                        peak_period_file.seek(0) # Reset file pointer
+                        lines = peak_period_file.read().decode('utf-8-sig').splitlines()
+                        
+                        header_row_index = -1
+                        for i, line in enumerate(lines):
+                            if 'Date (CET)' in line and 'Is HLF' in line:
+                                header_row_index = i
+                                break
+                        
+                        if header_row_index == -1:
+                            st.error("❌ Invalid Peak Restriction File: Could not find the required header row with 'Date (CET)' and 'Is HLF' columns.")
+                            st.stop()
+
+                        # 2. Re-read the CSV from the correct line and pass to ETL
+                        # We convert the clean part of the file into an in-memory text stream
+                        clean_csv_in_memory = io.StringIO('\n'.join(lines[header_row_index:]))
+                        
+                        df_peak = etl_long_to_wide(
+                            input_source=clean_csv_in_memory,
+                            datetime_column_name='Date (CET)',
+                            value_column_name='Is HLF'
+                        )
+                        st.success("✅ Peak restriction data cleaned and ETL successful!")
+                        
+                        # Cache the successful result
+                        st.session_state['cached_df_peak'] = df_peak.copy()
+                        st.session_state['cached_peak_config_key'] = peak_config_key
+
+                    except Exception as e:
+                        st.error(f"❌ A critical error occurred while processing the peak restriction file: {e}")
+                        st.info("Please ensure the file contains 'Date (CET)' and 'Is HLF' columns somewhere inside it.")
+                        st.stop()
 
     # Continue if price data is loaded
     if df_price is not None:
@@ -340,48 +486,6 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                     st.warning(f"⚠️ Found {merged_days} matching days. {original_days - merged_days} days were dropped due to no corresponding demand data.")
                 else:
                     st.success(f"✅ Successfully merged price and demand data for {merged_days} days.")
-
-            # --- NEW: Process peak restriction data if uploaded ---
-            df_peak = None
-            if peak_period_option == 'Upload CSV File':
-                if peak_period_file is None:
-                    st.warning("Please upload a Peak Period CSV file in the sidebar to proceed.")
-                    st.stop()
-                else:
-                    st.info("Uploaded peak restriction file detected. Processing...")
-                    with st.spinner("Analyzing and cleaning peak restriction file..."):
-                        try:
-                            # --- ROBUST FILE HANDLING LOGIC ---
-                            
-                            # 1. Read the file to find the real header row
-                            peak_period_file.seek(0) # Reset file pointer
-                            lines = peak_period_file.read().decode('utf-8-sig').splitlines()
-                            
-                            header_row_index = -1
-                            for i, line in enumerate(lines):
-                                if 'Date (CET)' in line and 'Is HLF' in line:
-                                    header_row_index = i
-                                    break
-                            
-                            if header_row_index == -1:
-                                st.error("❌ Invalid Peak Restriction File: Could not find the required header row with 'Date (CET)' and 'Is HLF' columns.")
-                                st.stop()
-
-                            # 2. Re-read the CSV from the correct line and pass to ETL
-                            # We convert the clean part of the file into an in-memory text stream
-                            clean_csv_in_memory = io.StringIO('\n'.join(lines[header_row_index:]))
-                            
-                            df_peak = etl_long_to_wide(
-                                input_source=clean_csv_in_memory,
-                                datetime_column_name='Date (CET)',
-                                value_column_name='Is HLF'
-                            )
-                            st.success("✅ Peak restriction data cleaned and ETL successful!")
-
-                        except Exception as e:
-                            st.error(f"❌ A critical error occurred while processing the peak restriction file: {e}")
-                            st.info("Please ensure the file contains 'Date (CET)' and 'Is HLF' columns somewhere inside it.")
-                            st.stop()
 
             # --- UPDATED: Merge price, demand, and peak dataframes ---
             if df_peak is not None:
@@ -619,6 +723,11 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             results = st.session_state['results']
             all_trades = st.session_state['all_trades']
             gas_baseline = st.session_state['gas_baseline']
+            
+            # Convert results to DataFrames for easier analysis
+            results_df = pd.DataFrame(results)
+            results_df['date'] = pd.to_datetime(results_df['day'])
+            trades_df = pd.DataFrame(all_trades)
 
             col1, col2 = st.columns([3, 1])
             with col1:
@@ -674,9 +783,7 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
                 st.warning(f"**Worst day:** {worst_day['day']} (€{worst_day['savings']:.2f} saved)")
 
             st.header("📈 Visualizations")
-            results_df = pd.DataFrame(results)
-            results_df['date'] = pd.to_datetime(results_df['day'])
-
+            
             fig1 = px.line(results_df, x='date', y='savings', title='Daily Savings Over Time', labels={'savings': 'Savings (€)', 'date': 'Date'})
             fig1.add_hline(y=avg_savings, line_dash="dash", annotation_text=f"Average: €{avg_savings:.2f}")
             st.plotly_chart(fig1, use_container_width=True)
@@ -691,34 +798,69 @@ if uploaded_file is not None or api_config is not None or use_builtin_data:
             fig3.update_layout(title='Daily Energy Input Mix', xaxis_title='Date', yaxis_title='Energy (MWh)')
             st.plotly_chart(fig3, use_container_width=True)
 
-            st.header("Sample Day Analysis")
-            with st.expander("🔍 Detailed Day Analysis"):
-                sample_day = st.selectbox("Select a day to analyze:", options=results_df['day'].tolist())
-                if sample_day:
-                    day_trades = pd.DataFrame([t for t in all_trades if t['date'] == sample_day])
-                    if not day_trades.empty:
-                        fig4 = make_subplots(rows=3, cols=1, subplot_titles=('Electricity Price & Storage Operations', 'State of Charge', 'Cost Breakdown'), vertical_spacing=0.1, specs=[[{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]])
-                        fig4.add_trace(go.Scatter(x=day_trades['time'], y=day_trades['da_price'], name='DA Price', line=dict(color='blue')), row=1, col=1, secondary_y=False)
-                        fig4.add_trace(go.Scatter(x=day_trades['time'], y=day_trades['p_el_heater'], name='Charging', line=dict(color='green', dash='dot')), row=1, col=1, secondary_y=True)
-                        fig4.add_trace(go.Scatter(x=day_trades['time'], y=day_trades['p_th_discharge'], name='Discharging', line=dict(color='red', dash='dot')), row=1, col=1, secondary_y=True)
-                        # --- NEW: Plot thermal demand on the operations chart ---
-                        fig4.add_trace(go.Scatter(x=day_trades['time'], y=day_trades['demand_th'], name='Thermal Demand', line=dict(color='purple', dash='longdash')), row=1, col=1, secondary_y=True)
-                        fig4.add_trace(go.Scatter(x=day_trades['time'], y=day_trades['soc'], name='SOC', line=dict(color='orange')), row=2, col=1)
-                        fig4.add_trace(go.Scatter(x=day_trades['time'], y=day_trades['elec_cost_interval'], name='Elec Cost', line=dict(color='blue')), row=3, col=1)
-                        fig4.add_trace(go.Scatter(x=day_trades['time'], y=day_trades['gas_cost_interval'], name='Gas Cost', line=dict(color='red')), row=3, col=1)
+            st.header("Sample Period Analysis")
+            with st.expander("🔍 Detailed Period Analysis"):
+                # --- MODIFICATION START ---
+                trades_df['date_obj'] = pd.to_datetime(trades_df['date'])
+                min_analysis_date = results_df['date'].min().date()
+                max_analysis_date = results_df['date'].max().date()
 
-                        fig4.update_layout(height=800, title_text=f"Detailed Analysis for {sample_day}")
+                st.write("Select a date range for detailed operational analysis:")
+                col1, col2 = st.columns(2)
+                with col1:
+                    start_date_analysis = st.date_input(
+                        "Start Date",
+                        value=min_analysis_date,
+                        min_value=min_analysis_date,
+                        max_value=max_analysis_date,
+                        key="analysis_start"
+                    )
+                with col2:
+                    # Auto-adjust end date if start date is later
+                    default_end_date = max(min_analysis_date, start_date_analysis)
+                    end_date_analysis = st.date_input(
+                        "End Date",
+                        value=default_end_date,
+                        min_value=start_date_analysis,  # End date can't be before start date
+                        max_value=max_analysis_date,
+                        key="analysis_end"
+                    )
+
+                if start_date_analysis > end_date_analysis:
+                    st.error("Analysis start date cannot be after the end date.")
+                else:
+                    mask = (trades_df['date_obj'].dt.date >= start_date_analysis) & (trades_df['date_obj'].dt.date <= end_date_analysis)
+                    analysis_trades = trades_df[mask].copy()
+
+                    if not analysis_trades.empty:
+                        # Create a full datetime column for continuous plotting
+                        analysis_trades['datetime'] = pd.to_datetime(analysis_trades['date'] + ' ' + analysis_trades['time'])
+                        analysis_trades = analysis_trades.sort_values('datetime')
+
+                        fig4 = make_subplots(rows=3, cols=1, subplot_titles=('Electricity Price & Storage Operations', 'State of Charge', 'Cost Breakdown'), vertical_spacing=0.1, specs=[[{"secondary_y": True}], [{"secondary_y": False}], [{"secondary_y": False}]])
+                        
+                        # Use the new 'datetime' column for the x-axis
+                        fig4.add_trace(go.Scatter(x=analysis_trades['datetime'], y=analysis_trades['da_price'], name='DA Price', line=dict(color='blue')), row=1, col=1, secondary_y=False)
+                        fig4.add_trace(go.Scatter(x=analysis_trades['datetime'], y=analysis_trades['p_el_heater'], name='Charging', line=dict(color='green', dash='dot')), row=1, col=1, secondary_y=True)
+                        fig4.add_trace(go.Scatter(x=analysis_trades['datetime'], y=analysis_trades['p_th_discharge'], name='Discharging', line=dict(color='red', dash='dot')), row=1, col=1, secondary_y=True)
+                        fig4.add_trace(go.Scatter(x=analysis_trades['datetime'], y=analysis_trades['demand_th'], name='Thermal Demand', line=dict(color='purple', dash='longdash')), row=1, col=1, secondary_y=True)
+                        fig4.add_trace(go.Scatter(x=analysis_trades['datetime'], y=analysis_trades['soc'], name='SOC', line=dict(color='orange')), row=2, col=1)
+                        fig4.add_trace(go.Scatter(x=analysis_trades['datetime'], y=analysis_trades['elec_cost_interval'], name='Elec Cost', line=dict(color='blue')), row=3, col=1)
+                        fig4.add_trace(go.Scatter(x=analysis_trades['datetime'], y=analysis_trades['gas_cost_interval'], name='Gas Cost', line=dict(color='red')), row=3, col=1)
+
+                        fig4.update_layout(height=800, title_text=f"Detailed Analysis from {start_date_analysis} to {end_date_analysis}")
                         fig4.update_yaxes(title_text="Price (€/MWh)", row=1, col=1, secondary_y=False)
                         fig4.update_yaxes(title_text="Power (MW)", row=1, col=1, secondary_y=True, showgrid=False)
                         fig4.update_yaxes(title_text="Storage (MWh)", row=2, col=1)
                         fig4.update_yaxes(title_text="Cost (€)", row=3, col=1)
-                        hourly_times = day_trades[day_trades['interval'] % 4 == 0]['time'].tolist()
-                        fig4.update_xaxes(tickmode='array', tickvals=hourly_times, ticktext=[t.split(':')[0] + ':00' for t in hourly_times], tickangle=0)
+                        
                         st.plotly_chart(fig4, use_container_width=True)
+                    else:
+                        st.warning("No data available for the selected date range.")
+                # --- MODIFICATION END ---
 
             st.header("💾 Download Results")
-            if all_trades:
-                trades_df = pd.DataFrame(all_trades)
+            if not trades_df.empty:
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
                     trades_csv = trades_df.to_csv(index=False)

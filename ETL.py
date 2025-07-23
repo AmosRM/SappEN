@@ -13,7 +13,7 @@ def fetch_enappsys_data(
     entities: str = "ALL",
     start_date: str = None,
     end_date: str = None,
-    resolution: str = "hourly",
+    resolution: str = "qh",
     timezone: str = "CET",
     currency: str = "EUR",
     **kwargs
@@ -38,7 +38,7 @@ def fetch_enappsys_data(
     end_date : str
         End date in format "dd/mm/yyyy hh:mm" or "yyyymmddhhmm"
     resolution : str
-        Data resolution (hourly, daily, etc.)
+        Data resolution ("qh" for quarter hourly, "hourly", "daily", etc. - default is "qh")
     timezone : str
         Timezone (CET, WET, EET)
     currency : str
@@ -184,7 +184,7 @@ def etl_long_to_wide(
             'entities': 'entities_list' (for bulk API),
             'start_date': 'dd/mm/yyyy hh:mm',
             'end_date': 'dd/mm/yyyy hh:mm',
-            'resolution': 'hourly',
+            'resolution': 'qh',
             'timezone': 'CET',
             'currency': 'EUR'
         }
@@ -354,7 +354,7 @@ def main():
             'chart_code': 'gb/elec/pricing/daprices',  # UK day-ahead prices
             'start_date': '01/01/2023 00:00',
             'end_date': '31/01/2023 23:59',
-            'resolution': 'hourly',
+            'resolution': 'qh',
             'timezone': 'WET',
             'currency': 'GBP'
         }
@@ -385,7 +385,7 @@ def main():
             'entities': 'NL_SOLAR,NL_SOLAR_P10,NL_SOLAR_P90',
             'start_date': '01/01/2023 00:00',
             'end_date': '31/01/2023 23:59',
-            'resolution': 'hourly',
+            'resolution': 'qh',
             'timezone': 'CET'
         }
         
